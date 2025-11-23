@@ -1,15 +1,5 @@
-// hdf5_filter_bench.cpp
-// Compile: g++ -std=c++17 hdf5_filter_bench.cpp -o hdf5_filter_bench -lhdf5_cpp -lhdf5
-// (可能需要 -I/path/to/hdf5/include 和 -L/path/to/hdf5/lib)
-
-// 基本思路：
-// - 递归遍历源文件，复制组与非目标数据集（通过读写实现）
-// - 对 target datasets ("read_*/Raw" and "read_*/Signal") 使用不同 DSetCreatPropList 创建目标文件并写入数据（计时）
-// - 读回压缩文件的这些 datasets（计时）
-// - 使用 std::filesystem 获取文件大小并输出 CSV 报表
-
 #include <H5Cpp.h>
-#include <hdf5.h> // for H5Zfilter_avail
+#include <hdf5.h> 
 #include <iostream>
 #include <vector>
 #include <string>
@@ -31,59 +21,41 @@ struct Result {
     double compress_ms;
 };
 
-std::string joinpath(const std::string &a, const std::string &b) {
-    if (a.empty() || a == "/") return "/" + b;
-    return a + (a.back() == '/' ? "" : "/") + b;
-}
+// 判断是都要解压的数据集
+bool is_target_dataset(const std::string &fullpath, const std::string &dset_name) {
+    if (!(dset_name == "Raw" || dset_name == "Signal")) return false;
 
-// Checks whether an HDF5 object name corresponds to a "read_xxx" prefix in the path.
-// We'll consider that if the dataset's full path contains a segment starting with "read_".
-// Example: /some/read_0001/Raw  -> matches
-bool path_has_read_prefix(const std::string &fullpath) {
     std::regex re("(^|/)(read_[^/]+)(/|$)");
     return std::regex_search(fullpath, re);
 }
 
-bool is_target_dataset(const std::string &fullpath, const std::string &dset_name) {
-    // We want to compress datasets named "Raw" or "Signal" that are under a read_* group.
-    if (!(dset_name == "Raw" || dset_name == "Signal")) return false;
-    return path_has_read_prefix(fullpath);
-}
-
-// Utility: copy attributes from source object to destination dataset/group
+// 复制属性从src_loc/name到dst_loc
 void copy_attributes(hid_t src_loc, const std::string &name, hid_t dst_loc) {
-    // src_loc/dst_loc are object locations (file or group) that contain 'name'
-    // We'll open attribute list on source object and write to destination
-    // Simpler approach: iterate attributes on the opened object (H5Aiterate)
-    // But using H5Cpp: open object by name then copy attributes via low-level API
-    // For simplicity, open source object, get number of attributes via H5Aget_num_attrs (H5Oinfo).
     hid_t obj = H5Oopen(src_loc, name.c_str(), H5P_DEFAULT);
     if (obj < 0) return;
     H5O_info_t oinfo;
     if (H5Oget_info(obj, &oinfo) < 0) { H5Oclose(obj); return; }
-    // iterate attributes
+    // 遍历属性
     int nattrs = H5Aget_num_attrs(obj); // C API
     for (int i = 0; i < nattrs; ++i) {
         hid_t attr = H5Aopen_by_idx(obj, ".", H5_INDEX_NAME, H5_ITER_INC, (hsize_t)i, H5P_DEFAULT, H5P_DEFAULT);
         if (attr < 0) continue;
-        // get name
+        // 获取属性名称
         ssize_t name_len = H5Aget_name(attr, 0, nullptr);
         std::string aname(name_len + 1, '\0');
         H5Aget_name(attr, name_len + 1, &aname[0]);
         aname.resize(name_len);
-        // datatype and dataspace
+        // 获取属性类型和空间
         hid_t atype = H5Aget_type(attr);
         hid_t aspace = H5Aget_space(attr);
-        // read raw bytes
+        // 读取原始属性数据
         hsize_t asize = H5Tget_size(atype);
-        // allocate buffer according to dataspace and type; for simplicity, read via H5Aread using memory type equal to atype
-        // create attribute on destination
+        // 创建目标对象
         hid_t dst_obj = H5Oopen(dst_loc, name.c_str(), H5P_DEFAULT);
         if (dst_obj < 0) { H5Tclose(atype); H5Sclose(aspace); H5Aclose(attr); continue; }
-        // create attribute on dst_obj
         hid_t dst_attr = H5Acreate2(dst_obj, aname.c_str(), atype, aspace, H5P_DEFAULT, H5P_DEFAULT);
         if (dst_attr >= 0) {
-            // allocate buffer large enough (for simple scalar or small arrays). We'll read using H5T_NATIVE_CHAR into a buffer sized by datatype * nelem
+            // 读取属性数据并写入目标属性
             hssize_t nelmts = H5Sget_simple_extent_npoints(aspace);
             size_t tsize = H5Tget_size(atype);
             std::vector<char> buf(tsize * nelmts);
@@ -100,8 +72,7 @@ void copy_attributes(hid_t src_loc, const std::string &name, hid_t dst_loc) {
     H5Oclose(obj);
 }
 
-// Helper: read entire dataset into memory (raw bytes) and return vector<char>
-// Also returns datatype id and dataspace info via output params for writing later.
+// 读取数据集的原始字节
 bool read_dataset_raw(H5::H5File &file, const std::string &path, std::vector<char> &outbuf,
                       hid_t &mem_type_id, std::vector<hsize_t> &dims_out, H5::DataType &cpp_dtype) {
     try {
@@ -111,26 +82,23 @@ bool read_dataset_raw(H5::H5File &file, const std::string &path, std::vector<cha
         dims_out.resize(rank);
         space.getSimpleExtentDims(dims_out.data(), nullptr);
 
-        // C++ DataType
+        //获取本机数据类型
         cpp_dtype = ds.getDataType();
-        // get native size
         hid_t native_tid = H5Tget_native_type(cpp_dtype.getId(), H5T_DIR_DEFAULT);
         mem_type_id = native_tid;
 
-        // compute total bytes
+        // 计算缓冲区大小
         hsize_t total = 1;
         for (auto d : dims_out) total *= d;
         size_t type_size = H5Tget_size(native_tid);
         outbuf.resize(static_cast<size_t>(total) * type_size);
 
-        // read
         herr_t err = H5Dread(ds.getId(), native_tid, H5S_ALL, H5S_ALL, H5P_DEFAULT, outbuf.data());
         if (err < 0) {
             std::cerr << "Error reading dataset: " << path << "\n";
             H5Tclose(native_tid);
             return false;
         }
-        // leave native_tid open for caller to use; caller must H5Tclose(native_tid) after use
         return true;
     } catch (...) {
         std::cerr << "Exception reading dataset: " << path << "\n";
@@ -138,13 +106,12 @@ bool read_dataset_raw(H5::H5File &file, const std::string &path, std::vector<cha
     }
 }
 
-// Helper: create dataset in dst file with given dims, mem_type_id, and property list, and write raw bytes
+//创建并写入数据集
 bool create_and_write_dataset(H5::H5File &dst, const std::string &path,
                               hid_t mem_type_id, const std::vector<hsize_t> &dims,
                               const std::vector<char> &buf, const DSetCreatPropList &plist) {
     try {
-        // ensure parent groups exist
-        // split path and create groups if needed
+        // 检查组是否存在，若不存在则创建
         std::string p = path;
         if (p.front() == '/') p.erase(0,1);
         size_t pos = 0;
@@ -154,11 +121,9 @@ bool create_and_write_dataset(H5::H5File &dst, const std::string &path,
             std::string token = (slash==std::string::npos) ? p.substr(pos) : p.substr(pos, slash-pos);
             pos = (slash==std::string::npos) ? std::string::npos : slash+1;
             if (pos==std::string::npos) {
-                // last token is dataset name, don't create as group
                 break;
             }
             cur += "/" + token;
-            // create group if not exists
             try {
                 Group g = dst.openGroup(cur);
             } catch(...) {
@@ -166,9 +131,8 @@ bool create_and_write_dataset(H5::H5File &dst, const std::string &path,
             }
             if (pos==std::string::npos) break;
         }
-        // now create dataset
+        // 创建数据集
         DataSpace space(static_cast<int>(dims.size()), dims.data());
-        // wrap mem_type_id into H5::DataType for C++ API convenience:
         DataType dtype(mem_type_id);
         DataSet ds = dst.createDataSet(path, dtype, space, plist);
         herr_t err = H5Dwrite(ds.getId(), mem_type_id, H5S_ALL, H5S_ALL, H5P_DEFAULT, buf.data());
@@ -178,11 +142,10 @@ bool create_and_write_dataset(H5::H5File &dst, const std::string &path,
     }
 }
 
-// Copy non-target dataset/group: read and write preserving type/shape (no property changes).
+// 非解压对象,直接复制保持不变
 bool copy_object_as_is(H5::H5File &src, H5::H5File &dst, const std::string &path) {
-    // path is absolute like /a/b/c (dataset or group)
     try {
-        // check if dataset
+        // 检查对象类型
         H5O_info_t oinfo;
         herr_t e = H5Oget_info_by_name(src.getId(), path.c_str(), &oinfo, H5P_DEFAULT);
         if (e < 0) return false;
@@ -197,15 +160,14 @@ bool copy_object_as_is(H5::H5File &src, H5::H5File &dst, const std::string &path
             H5Tclose(memtid);
             return ok;
         } else if (oinfo.type == H5O_TYPE_GROUP) {
-            // create group and copy attributes
+            // 创建组并复制属性
             try {
                 dst.createGroup(path);
             } catch(...) {}
-            // copy attributes: for simplicity we attempt to copy attributes on group
             hid_t src_loc = src.getId();
             hid_t dst_loc = dst.getId();
             copy_attributes(src_loc, path.c_str(), dst_loc);
-            // recursively copy children
+            // 递归复制子对象
             Group gsrc = src.openGroup(path);
             hsize_t n = gsrc.getNumObjs();
             for (hsize_t i = 0; i < n; ++i) {
@@ -217,7 +179,6 @@ bool copy_object_as_is(H5::H5File &src, H5::H5File &dst, const std::string &path
             }
             return true;
         } else {
-            // other object types - ignore
             return true;
         }
     } catch (...) {
@@ -235,16 +196,16 @@ int main(int argc, char **argv) {
     fs::path outdir = argv[2];
     fs::create_directories(outdir);
 
-    // filters to test: we will push (name, lambda to configure plist)
+    // 插件过滤器需要在运行前注册
     struct FilterSpec {
         std::string name;
         std::function<void(DSetCreatPropList&)> apply;
-        bool requires_avail; // if true, we check H5Zfilter_avail before using
-        unsigned int check_id; // filter id to check via H5Zfilter_avail (0 if none)
+        bool requires_avail; // 是否需要检测可用性
+        unsigned int check_id; // 插件过滤器ID
     };
     std::vector<FilterSpec> specs;
 
-    // baseline (no compression)
+    // 基线文件
     specs.push_back({"baseline_none", [](DSetCreatPropList &p){ /* no change */ }, false, 0});
 
     // shuffle + gzip levels 1,6,9
@@ -256,11 +217,8 @@ int main(int argc, char **argv) {
     // szip
 #ifdef H5Z_FILTER_SZIP
     specs.push_back({"szip", [](DSetCreatPropList &p){
-        // use HDF5 C API to set SZIP options? However H5::DSetCreatPropList doesn't expose setSzip.
-        // We'll use C API directly below per dataset if detected.
     }, true, H5Z_FILTER_SZIP});
 #else
-    // Will attempt detection below
     specs.push_back({"szip", [](DSetCreatPropList &p){}, true, H5Z_FILTER_SZIP});
 #endif
 
@@ -279,7 +237,7 @@ int main(int argc, char **argv) {
         });
     }*/
 
-    // open source
+    // 打开源文件
     H5::Exception::dontPrint();
     H5::H5File src;
     try {
@@ -289,15 +247,13 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    // create baseline file (explicit) - baseline_none above will create file we call baseline.h5
+    // 创建输出目录
     fs::path baseline_file = outdir / "baseline_none.h5";
-    // We'll implement a function that given a FilterSpec creates an output file and returns Result
     auto run_one = [&](const FilterSpec &spec) -> Result {
         std::string fname = spec.name + ".h5";
         fs::path outpath = outdir / fname;
-        // remove existing
+        // 创建输出文件，若存在则删除
         if (fs::exists(outpath)) fs::remove(outpath);
-        // create output file
         H5::H5File dst;
         try {
             dst = H5File(outpath.string(), H5F_ACC_TRUNC);
@@ -306,8 +262,7 @@ int main(int argc, char **argv) {
             return Result{spec.name,0,0,0};
         }
 
-        // We'll iterate over all objects at root and copy. But for target datasets (Raw/Signal under read_*), we will apply compression.
-        // Simpler: traverse using getNumObjs/getObjnameByIdx recursively.
+        // 递归遍历源文件对象，复制数据集和组
         double compress_ms = 0.0; //累计压缩时间
         std::function<void(H5::Group, H5::Group, const std::string&)> recurse;
         recurse = [&](H5::Group gsrc, H5::Group gdst, const std::string &gpath) {
@@ -320,20 +275,19 @@ int main(int argc, char **argv) {
                 else child_src_path = gpath + "/" + name;
 
                 if (type == H5G_GROUP) {
-                    // create group in dst
+                    // 创建目的组
                     try { gdst.createGroup(name); } catch(...) {}
-                    // copy group attributes (simple approach)
+                    // 复制属性
                     hid_t src_loc = gsrc.getId();
                     hid_t dst_loc = gdst.getId();
                     copy_attributes(src_loc, name.c_str(), dst_loc);
-                    // recurse
                     Group ngsrc = gsrc.openGroup(name);
                     Group ngdst = gdst.openGroup(name);
                     recurse(ngsrc, ngdst, child_src_path);
                 } else if (type == H5G_DATASET) {
-                    // check if target dataset to compress
+                    // 检查是否为目标数据集
                     bool is_target = is_target_dataset(child_src_path, name);
-                    // read raw data
+                    // 读取源数据集原始数据
                     std::vector<char> buf;
                     hid_t memtid = -1;
                     std::vector<hsize_t> dims;
@@ -344,18 +298,13 @@ int main(int argc, char **argv) {
                         continue;
                     }
 
-                    // decide property list
+                    // 创建属性列表
                     DSetCreatPropList plist;
-                    if (spec.name == "baseline_none") {
-                        // no compression, default storage (could be contiguous)
-                        // create contiguous dataset (default)
-                    } else {
-                        // if this dataset is target, apply filters
+                    if (spec.name ！= "baseline_none") {
                         if (is_target) {
-                            // choose chunk size: simple heuristic: set chunk to min(dim, 1024) for 1D or for higher dims set first dim chunk ~min( dims[0], 64)
+                            // chunk 设置
                             std::vector<hsize_t> chunk = dims;
                             if (chunk.size() == 0) chunk = {1};
-                            // reduce chunk sizes to reasonable product <= ~1e6 elements
                             const hsize_t MAX_ELEMS = 1024*1024;
                             hsize_t prod = 1;
                             for (auto d : chunk) prod *= (d>0?d:1);
@@ -367,37 +316,28 @@ int main(int argc, char **argv) {
                                 for (auto d : chunk) prod *= (d>0?d:1);
                             }
                             plist.setChunk((unsigned)chunk.size(), chunk.data());
-                            // apply spec filters
-                            // If spec requires avail check, we do H5Zfilter_avail
+                            // 应用过滤器
                             if (spec.requires_avail && spec.check_id != 0) {
                                 if (!H5Zfilter_avail(spec.check_id)) {
                                     std::cerr << "Filter " << spec.name << " not available; writing dataset uncompressed." << std::endl;
-                                    // leave uncompressed
                                 } else {
-                                    // special-case szip: use H5Pset_szip via C API since C++ binding doesn't have it.
-                                    if (spec.check_id == H5Z_FILTER_SZIP) {
-                                        // set SZIP - choose NN option and pixels per block default
-                                        // H5Pset_szip expects options_mask and pixels_per_block
-                                        // NOTE: not all HDF5 compile configs have SZIP; this is best-effort.
+                                    // // 设置 SZIP 选项
+                                    if (spec.check_id == H5Z_FILTER_SZIP) {           
                                         herr_t r = H5Pset_szip(plist.getId(), H5_SZIP_NN_OPTION_MASK, 16);
                                         if (r < 0) {
                                             std::cerr << "Warning: failed to set SZIP options for " << child_src_path << "\n";
                                         }
                                     } else {
-                                        // for other filters (deflate), spec.apply will call setDeflate or setShuffle
                                         spec.apply((DSetCreatPropList&)plist);
                                     }
                                 }
                             } else {
-                                // not requiring avail or standard filter: just apply
                                 spec.apply((DSetCreatPropList&)plist);
                             }
-                        } else {
-                            // non-target dataset: leave default (no compression)
                         }
                     }
 
-                    // time writing if dataset is target and spec not baseline_none
+                    // 计算写入时间
                     double write_ms = 0.0;
                     if (is_target && spec.name != "baseline_none") {
                         auto t1 = std::chrono::high_resolution_clock::now();
@@ -406,7 +346,7 @@ int main(int argc, char **argv) {
                         write_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
                         if (!okw) std::cerr << "Warning: failed to write compressed dataset " << child_src_path << "\n";
                     } else {
-                        // write normally, maybe measure as well for baseline
+                        // 写入非目标数据集或基线（无压缩）
                         auto t1 = std::chrono::high_resolution_clock::now();
                         bool okw = create_and_write_dataset(dst, child_src_path, memtid, dims, buf, plist);
                         auto t2 = std::chrono::high_resolution_clock::now();
@@ -415,23 +355,19 @@ int main(int argc, char **argv) {
                     }
                     compress_ms += write_ms;
 
-                    // close memtype
                     if (memtid > 0) H5Tclose(memtid);
-                } else {
-                    // other types: ignore
                 }
             }
         };
-        // start copying from root group
+        // 从根开始递归
         Group root_src = src.openGroup("/");
         Group root_dst = dst.openGroup("/");
         recurse(root_src, root_dst, "/");
 
-        // flush and close dst
         dst.flush(H5F_SCOPE_GLOBAL);
         dst.close();
 
-        // measure file size
+        // 计算输出文件大小
         uint64_t fsize = 0;
         try {
             fsize = fs::file_size(outpath);
@@ -442,7 +378,7 @@ int main(int argc, char **argv) {
         return Result{spec.name, fsize_mb, 0.0, compress_ms};
     };
 
-    // First generate baseline
+    // 首先生成基线文件
     std::cout << "Generating baseline (no compression) ...\n";
     FilterSpec baseline_spec = specs[0];
     Result baseline_res = run_one(baseline_spec);
@@ -457,7 +393,6 @@ int main(int argc, char **argv) {
 
     for (size_t i = 1; i < specs.size(); ++i) {
         const auto &spec = specs[i];
-        // if requires_avail, check
         if (spec.requires_avail && spec.check_id != 0) {
             if (!H5Zfilter_avail(spec.check_id)) {
                 std::cerr << "Filter " << spec.name << " not available in this HDF5. Skipping.\n";
@@ -469,7 +404,7 @@ int main(int argc, char **argv) {
         if (r.file_mb == 0) {
             std::cerr << "Warning: result file size 0 for " << spec.name << "\n";
         }
-        // compute ratio and reduction relative to baseline
+        // 计算压缩比率
         if (baseline_res.file_mb > 0 && r.file_mb > 0) {
             r.ratio = double(r.file_mb) / double(baseline_res.file_mb);
         } else {
@@ -479,7 +414,7 @@ int main(int argc, char **argv) {
         std::cout << " -> size=" << r.file_mb << " MB, ratio=" << r.ratio << ", compress_ms=" << r.compress_ms << "\n";
     }
 
-    // output CSV
+    // 输出 CSV
     fs::path csv = outdir / "hdf5_filter_results.csv";
     std::ofstream ofs(csv);
     ofs << "filter,file_mb,ratio_compressed_over_baseline,compress_ms\n";
@@ -491,5 +426,4 @@ int main(int argc, char **argv) {
     std::cout << "Done. Results at: " << csv << "\n";
     return 0;
 }
-
 
