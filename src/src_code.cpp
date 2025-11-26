@@ -8,8 +8,12 @@
 #include <fstream>
 #include <regex>
 #include <sstream>
+#include "hdf5/serial/hdf5.h"
 //#include <vbz-compression/vbz.h>
 //#include <vbz-compression/vbz_plugin.h>
+
+#define H5Z_FILTER_LZ4 32004
+#define H5Z_FILTER_ZSTD 32015
 
 namespace fs = std::filesystem;
 using namespace H5;
@@ -237,6 +241,20 @@ int main(int argc, char **argv) {
         });
     }*/
 
+    // lz4 (no level setting)
+    specs.push_back({"lz4", [](DSetCreatPropList &p){
+        p.setFilter(H5Z_FILTER_LZ4 , H5Z_FLAG_MANDATORY, 0, nullptr);
+    }, true, H5Z_FILTER_LZ4 });
+
+    // zstd 
+    unsigned int levels[3] = {1, 11, 22};
+    for (unsigned int lev : levels) {
+        std::string fname = "zstd_lvl" + std::to_string(lev);
+        specs.push_back({fname, [lev](DSetCreatPropList &p){
+            p.setFilter(H5Z_FILTER_ZSTD, H5Z_FLAG_MANDATORY , 1,&lev);
+        }, true, H5Z_FILTER_ZSTD });
+    }
+
     // 打开源文件
     H5::Exception::dontPrint();
     H5::H5File src;
@@ -300,7 +318,7 @@ int main(int argc, char **argv) {
 
                     // 创建属性列表
                     DSetCreatPropList plist;
-                    if (spec.name ！= "baseline_none") {
+                    if (spec.name != "baseline_none") {
                         if (is_target) {
                             // chunk 设置
                             std::vector<hsize_t> chunk = dims;
@@ -426,4 +444,5 @@ int main(int argc, char **argv) {
     std::cout << "Done. Results at: " << csv << "\n";
     return 0;
 }
+
 
