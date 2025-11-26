@@ -52,7 +52,7 @@ include_xxx和src_xxx为未完成的代码，忽略之。
   cmake .. && make 
   mkdir output #测试结果输出到该文件夹
   ./hdf5_compress_test PBG08621_pass_6c7986d6_167483a9_0.hdf5 output/ #.hdf5文件路径需要修改为真实的路径
-  column -s -t ',' ../output/hdf5_filter_results.csv | less -S #查看输出结果
+  column -s -t ',' output/hdf5_filter_results.csv | less -S #查看输出结果
 ```
 
 **测试结果：**<br>
