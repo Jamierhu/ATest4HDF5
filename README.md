@@ -1,6 +1,6 @@
 # 文件目录介绍
-include_xxx和src_xxx为未完成的代码。
 src目录中为原始可运行的代码。
+include_xxx和src_xxx为未完成的代码，忽略之。
 
 # 环境配置
 **操作系统：** Ubuntu:22.04<br><br>
@@ -13,21 +13,21 @@ src目录中为原始可运行的代码。
   apt install -y  hdf5-tools libhdf5-dev liblz4-dev
 ```
 - 源码安装 cmake <br>
-  源码安装hdf5需要至少3.26版本以上cmake，系统包安装的无法满足需求
+  源码安装hdf5需要至少3.26版本以上cmake，系统包安装的无法满足需求。
 ```
   git clone https://github.com/Kitware/CMake.git  
   cd CMake/
   ./bootstrap && make && make install
 ```
 - 源码安装 hdf5 <br>
-  hdf5_plugins使用需要源码安装hdf5，找到其需要的.cmake文件
+  hdf5_plugins使用需要源码安装hdf5，找到其需要的.cmake文件。
 ```
   git clone https://github.com/HDFGroup/hdf5.git
   mkdir build && cd build/
   cmake .. && make && make install
 ```
 - 源码安装zstd<br>
-  hdf5_plugins使用需要源码安装，找到其需要的.cmake文件：<br>
+  hdf5_plugins使用需要源码安装，找到其需要的.cmake文件。
 ```
   git clone https://github.com/facebook/zstd.git
   cd zstd/
@@ -56,7 +56,7 @@ src目录中为原始可运行的代码。
 ```
 
 **测试结果：**<br>
-时间有限，暂时只有gzip和szip的测试结果。
+
 | 压缩过滤器 | 参数配置   | 压缩级别 | 压缩比 | 压缩时间(ms) | 文件大小(MB) | 备注       |
 |------------|------------|----------|--------|--------------|--------------|------------|
 | None       | -          | -        | 1.0    | 318.519           | 363           | 基准（未压缩） |
